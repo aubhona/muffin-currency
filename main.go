@@ -366,7 +366,12 @@ func main() {
 	slog.SetDefault(logger)
 	
 	// Инициализируем Zipkin tracing
-	err = initTracing("muffin-currency", "http://localhost:9411/api/v2/spans")
+	zipkinEndpoint := os.Getenv("ZIPKIN_ENDPOINT")
+	if zipkinEndpoint == "" {
+		zipkinEndpoint = "http://localhost:9411/api/v2/spans"
+	}
+	
+	err = initTracing("muffin-currency", zipkinEndpoint)
 	if err != nil {
 		slog.Error("Failed to initialize Zipkin tracing", "error", err)
 		os.Exit(1)
@@ -425,7 +430,7 @@ func main() {
 	
 	logger.Info("Starting server", 
 		"port", port,
-		"zipkin_endpoint", "http://localhost:9411/api/v2/spans")
+		"zipkin_endpoint", zipkinEndpoint)
 	
 	if err = server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("Server failed to start", "error", err)
