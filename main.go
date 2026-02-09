@@ -2,16 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/binary"
 	"fmt"
 	"io"
-	"strings"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,8 +21,8 @@ import (
 
 	// Zipkin imports
 	"github.com/openzipkin/zipkin-go"
-	zipkinhttp "github.com/openzipkin/zipkin-go/reporter/http"
 	"github.com/openzipkin/zipkin-go/model"
+	zipkinhttp "github.com/openzipkin/zipkin-go/reporter/http"
 )
 
 type CurrencyRate struct {
@@ -83,13 +83,13 @@ var rates = map[string]map[string]float64{
 func initTracing(serviceName, zipkinURL string) error {
 	// Create a reporter to send traces to Zipkin
 	reporter := zipkinhttp.NewReporter(zipkinURL)
-	
+
 	// Create local endpoint
 	endpoint, err := zipkin.NewEndpoint(serviceName, "localhost:8080")
 	if err != nil {
 		return fmt.Errorf("failed to create zipkin endpoint: %w", err)
 	}
-	
+
 	// Create the tracer
 	tracer, err = zipkin.NewTracer(
 		reporter,
@@ -98,15 +98,15 @@ func initTracing(serviceName, zipkinURL string) error {
 		zipkin.WithSharedSpans(false),
 		zipkin.WithSampler(zipkin.AlwaysSample),
 	)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to create zipkin tracer: %w", err)
 	}
-	
-	slog.Info("Zipkin tracing initialized", 
-		"service", serviceName, 
+
+	slog.Info("Zipkin tracing initialized",
+		"service", serviceName,
 		"zipkin_url", zipkinURL)
-	
+
 	return nil
 }
 
@@ -127,29 +127,29 @@ func tracingMiddleware(next http.Handler) http.Handler {
 			zipkin.Parent(spanContext),
 		)
 		defer span.Finish()
-		
+
 		// Add span to context
 		ctx := zipkin.NewContext(r.Context(), span)
-		
+
 		// Add HTTP tags to span
 		span.Tag("http.method", r.Method)
 		span.Tag("http.url", r.URL.String())
 		span.Tag("http.path", r.URL.Path)
 		span.Tag("component", "http")
-		
+
 		// Get trace ID for logging and metrics
 		traceID := span.Context().TraceID.String()
-		
+
 		// Add trace ID to response headers
 		w.Header().Set("X-Trace-ID", traceID)
-		
+
 		// Create custom response writer to capture status code
 		rw := &responseWriter{
 			ResponseWriter: w,
 			statusCode:     http.StatusOK,
 			traceID:        traceID,
 		}
-		
+
 		// Log request start with trace ID
 		slog.Info("Request started",
 			"method", r.Method,
@@ -157,16 +157,16 @@ func tracingMiddleware(next http.Handler) http.Handler {
 			"trace_id", traceID,
 			"span_id", span.Context().ID.String(),
 		)
-		
+
 		// Call next handler
 		next.ServeHTTP(rw, r.WithContext(ctx))
-		
+
 		// Add status code to span
 		span.Tag("http.status_code", fmt.Sprintf("%d", rw.statusCode))
 		if rw.statusCode >= 400 {
 			span.Tag("error", "true")
 		}
-		
+
 		// Log request completion
 		slog.Info("Request completed",
 			"method", r.Method,
@@ -181,31 +181,31 @@ func tracingMiddleware(next http.Handler) http.Handler {
 func metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		
+
 		// Get trace ID from context
 		var traceID string
 		if span := zipkin.SpanFromContext(r.Context()); span != nil {
 			traceID = span.Context().TraceID.String()
 		}
-		
+
 		// Wrap response writer
 		rw := &responseWriter{
 			ResponseWriter: w,
 			statusCode:     http.StatusOK,
 			traceID:        traceID,
 		}
-		
+
 		next.ServeHTTP(rw, r)
-		
+
 		duration := time.Since(start).Seconds()
-		
+
 		// Record metrics with trace ID
 		httpRequestsTotal.WithLabelValues(
 			r.Method,
 			r.URL.Path,
 			fmt.Sprintf("%d", rw.statusCode),
 		).Inc()
-		
+
 		httpRequestDuration.WithLabelValues(
 			r.Method,
 			r.URL.Path,
@@ -230,71 +230,71 @@ func getRateHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	span := zipkin.SpanFromContext(ctx)
 	var traceID string
-	
+
 	if span != nil {
 		traceID = span.Context().TraceID.String()
 		span.Tag("handler", "get_rate")
 		span.Tag("operation", "currency_conversion")
 	}
-	
+
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
-	
+
 	// Log with trace ID
 	slog.Info("Processing currency conversion",
 		"from", from,
 		"to", to,
 		"trace_id", traceID,
 	)
-	
+
 	if from == "" || to == "" {
-		slog.Error("Missing parameters", 
-			"from", from, 
+		slog.Error("Missing parameters",
+			"from", from,
 			"to", to,
 			"trace_id", traceID)
-		
+
 		if span != nil {
 			span.Tag("error", "missing_parameters")
 		}
-		
+
 		http.Error(w, `{"error": "Missing 'from' or 'to' parameter"}`, http.StatusBadRequest)
 		return
 	}
-	
+
 	rate, exists := rates[from][to]
 	if !exists {
 		slog.Error("Currency pair not found",
 			"from", from,
 			"to", to,
 			"trace_id", traceID)
-		
+
 		if span != nil {
 			span.Tag("error", "pair_not_found")
 		}
-		
+
 		http.Error(w, `{"error": "Currency pair not found"}`, http.StatusNotFound)
 		return
 	}
-	
+
 	// Add currency pair tags to span
 	if span != nil {
 		span.Tag("currency.from", from)
 		span.Tag("currency.to", to)
 		span.Tag("currency.rate", fmt.Sprintf("%f", rate))
 	}
-	
+
 	// Export to Prometheus with trace ID
 	currencyRateGauge.WithLabelValues(from, to).Set(rate)
-	
+
 	response := CurrencyRate{
 		From: from,
 		To:   to,
 		Rate: rate,
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
-	
+
 	slog.Info("Currency rate returned",
 		"from", from,
 		"to", to,
@@ -308,16 +308,16 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	span := zipkin.SpanFromContext(ctx)
 	var traceID string
-	
+
 	if span != nil {
 		traceID = span.Context().TraceID.String()
 		span.Tag("handler", "health_check")
 	}
-	
+
 	healthStatus.Set(1)
-	
+
 	slog.Info("Health check requested", "trace_id", traceID)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -332,14 +332,14 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	span := zipkin.SpanFromContext(ctx)
 	var traceID string
-	
+
 	if span != nil {
 		traceID = span.Context().TraceID.String()
 		span.Tag("handler", "readiness_check")
 	}
-	
+
 	slog.Info("Readiness check requested", "trace_id", traceID)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -357,52 +357,52 @@ func main() {
 		os.Exit(1)
 	}
 	defer logFile.Close()
-	
+
 	// Создаем multi-writer для логирования в файл и stdout
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	logger := slog.New(slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
-	
+
 	// Инициализируем Zipkin tracing
 	zipkinEndpoint := os.Getenv("ZIPKIN_ENDPOINT")
 	if zipkinEndpoint == "" {
 		zipkinEndpoint = "http://localhost:9411/api/v2/spans"
 	}
-	
+
 	err = initTracing("muffin-currency", zipkinEndpoint)
 	if err != nil {
 		slog.Error("Failed to initialize Zipkin tracing", "error", err)
 		os.Exit(1)
 	}
-	
+
 	// Инициализируем health метрику
 	healthStatus.Set(1)
-	
+
 	// Настройка маршрутов
 	mux := http.NewServeMux()
-	
+
 	// Business логика
 	mux.HandleFunc("/rate", getRateHandler)
-	
+
 	// Health checks
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/readyz", readyHandler)
-	
+
 	// Prometheus метрики
 	mux.Handle("/metrics", promhttp.Handler())
-	
+
 	// Apply middlewares in order: tracing -> metrics -> router
 	handler := tracingMiddleware(mux)
 	handler = metricsMiddleware(handler)
-	
+
 	// Конфигурируем порт
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	
+
 	server := &http.Server{
 		Addr:         ":" + port,
 		Handler:      handler,
@@ -410,28 +410,28 @@ func main() {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	
+
 	// Graceful shutdown
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
-		
+
 		logger.Info("Shutting down server...")
 		healthStatus.Set(0)
-		
+
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		
+
 		if err = server.Shutdown(ctx); err != nil {
 			logger.Error("Server forced to shutdown", "error", err)
 		}
 	}()
-	
-	logger.Info("Starting server", 
+
+	logger.Info("Starting server",
 		"port", port,
 		"zipkin_endpoint", zipkinEndpoint)
-	
+
 	if err = server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("Server failed to start", "error", err)
 		os.Exit(1)
@@ -443,7 +443,7 @@ func ParseTraceparent(tp string) (model.SpanContext, error) {
 	if tp == "" {
 		return model.SpanContext{}, nil // Нет заголовка - создаем новый trace
 	}
-	
+
 	parts := strings.Split(tp, "-")
 	if len(parts) < 4 {
 		return model.SpanContext{}, fmt.Errorf("invalid traceparent format: %s", tp)
